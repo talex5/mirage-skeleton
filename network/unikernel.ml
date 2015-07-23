@@ -11,6 +11,20 @@ let (>>!=) x f =
   | `Eof -> failwith "EOF"
   | `Error _ -> failwith "Error"
 
+let () =
+  let open Tcp in
+  [Segment.info] |> List.iter (fun log ->
+    Log.enable log;
+    Log.set_stats log false
+  )
+
+let stop_after = ref (-1)
+
+let () =
+  Tcp.Segment.retransmit := (fun () ->
+    if !stop_after < 0 then stop_after := 20
+  )
+
 module RingBuffer : sig
   val record : string -> unit
 end = struct
@@ -18,6 +32,10 @@ end = struct
 
   let record s =
     Queue.push s trace_buffer;
+    if !stop_after > 0 then (
+      decr stop_after;
+      if !stop_after = 0 then exit 1
+    );
     if Queue.length trace_buffer > 1000 then ignore (Queue.pop trace_buffer)
 
   let () =
@@ -110,7 +128,7 @@ module Main (C: V1_LWT.CONSOLE) (Netif : V1_LWT.NETWORK) = struct
           | n ->
               S.TCPV4.write flow payload >>!= fun () ->
               aux (n - 1) in
-        aux 1000 >>= fun () ->
+        aux 10000000 >>= fun () ->
         S.TCPV4.close flow >>= fun () ->
         exit 0
       );
