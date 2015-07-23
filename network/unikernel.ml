@@ -11,21 +11,34 @@ let (>>!=) x f =
   | `Eof -> failwith "EOF"
   | `Error _ -> failwith "Error"
 
-let trace_channel =
-  Lwt_io.open_file ~mode:Lwt_io.Output "trace.pcap" >>= fun channel ->
-  let header_buf = Cstruct.create Pcap.sizeof_pcap_header in
-  Pcap.LE.set_pcap_header_magic_number header_buf Pcap.magic_number;
-  Pcap.LE.set_pcap_header_network header_buf Pcap.Network.(to_int32 Ethernet);
-  Pcap.LE.set_pcap_header_sigfigs header_buf 0l;
-  Pcap.LE.set_pcap_header_snaplen header_buf 0xffffl;
-  Pcap.LE.set_pcap_header_thiszone header_buf 0l;
-  Pcap.LE.set_pcap_header_version_major header_buf Pcap.major_version;
-  Pcap.LE.set_pcap_header_version_minor header_buf Pcap.minor_version;
-  Lwt_io.write channel (Cstruct.to_string header_buf) >|= fun () ->
-  channel
+module RingBuffer : sig
+  val record : string -> unit
+end = struct
+  let trace_buffer = Queue.create ()
+
+  let record s =
+    Queue.push s trace_buffer;
+    if Queue.length trace_buffer > 1000 then ignore (Queue.pop trace_buffer)
+
+  let () =
+    at_exit (fun () ->
+      print_endline "Writing trace.pcap...";
+      let ch = open_out "trace.pcap" in
+      let header_buf = Cstruct.create Pcap.sizeof_pcap_header in
+      Pcap.LE.set_pcap_header_magic_number header_buf Pcap.magic_number;
+      Pcap.LE.set_pcap_header_network header_buf Pcap.Network.(to_int32 Ethernet);
+      Pcap.LE.set_pcap_header_sigfigs header_buf 0l;
+      Pcap.LE.set_pcap_header_snaplen header_buf 0xffffl;
+      Pcap.LE.set_pcap_header_thiszone header_buf 0l;
+      Pcap.LE.set_pcap_header_version_major header_buf Pcap.major_version;
+      Pcap.LE.set_pcap_header_version_minor header_buf Pcap.minor_version;
+      output_string ch (Cstruct.to_string header_buf);
+      Queue.iter (output_string ch) trace_buffer;
+      print_endline "Saved."
+    )
+end
 
 let pcap_record buffer =
-  trace_channel >>= fun trace_channel ->
   let pcap_buf = Cstruct.create Pcap.sizeof_pcap_packet in
   let time = Unix.gettimeofday () in
   Pcap.LE.set_pcap_packet_incl_len pcap_buf (Int32.of_int (String.length buffer));
@@ -33,23 +46,23 @@ let pcap_record buffer =
   Pcap.LE.set_pcap_packet_ts_sec pcap_buf (Int32.of_float time);
   let frac = (time -. (float_of_int (truncate time))) *. 1000000.0 in
   Pcap.LE.set_pcap_packet_ts_usec pcap_buf (Int32.of_float frac);
-  Lwt_io.write trace_channel (Cstruct.to_string pcap_buf ^ buffer)
+  RingBuffer.record (Cstruct.to_string pcap_buf ^ buffer)
 
 module Main (C: V1_LWT.CONSOLE) (Netif : V1_LWT.NETWORK) = struct
   module Pcap_netif = struct
     include Netif
 
     let write t buffer =
-      pcap_record (Cstruct.to_string buffer) >>= fun () ->
+      pcap_record (Cstruct.to_string buffer);
       write t buffer
 
     let writev t buffers =
-      pcap_record (Cstruct.copyv buffers) >>= fun () ->
+      pcap_record (Cstruct.copyv buffers);
       writev t buffers
 
     let listen t fn =
       listen t (fun buffer ->
-        pcap_record (Cstruct.to_string buffer) >>= fun () ->
+        pcap_record (Cstruct.to_string buffer);
         fn buffer
       )
   end
@@ -97,8 +110,9 @@ module Main (C: V1_LWT.CONSOLE) (Netif : V1_LWT.NETWORK) = struct
           | n ->
               S.TCPV4.write flow payload >>!= fun () ->
               aux (n - 1) in
-        aux 100 >>= fun () ->
-        S.TCPV4.close flow
+        aux 1000 >>= fun () ->
+        S.TCPV4.close flow >>= fun () ->
+        exit 0
       );
 
     S.listen s
