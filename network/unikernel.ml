@@ -11,12 +11,54 @@ let (>>!=) x f =
   | `Eof -> failwith "EOF"
   | `Error _ -> failwith "Error"
 
+let trace_channel =
+  Lwt_io.open_file ~mode:Lwt_io.Output "trace.pcap" >>= fun channel ->
+  let header_buf = Cstruct.create Pcap.sizeof_pcap_header in
+  Pcap.LE.set_pcap_header_magic_number header_buf Pcap.magic_number;
+  Pcap.LE.set_pcap_header_network header_buf Pcap.Network.(to_int32 Ethernet);
+  Pcap.LE.set_pcap_header_sigfigs header_buf 0l;
+  Pcap.LE.set_pcap_header_snaplen header_buf 0xffffl;
+  Pcap.LE.set_pcap_header_thiszone header_buf 0l;
+  Pcap.LE.set_pcap_header_version_major header_buf Pcap.major_version;
+  Pcap.LE.set_pcap_header_version_minor header_buf Pcap.minor_version;
+  Lwt_io.write channel (Cstruct.to_string header_buf) >|= fun () ->
+  channel
+
+let pcap_record buffer =
+  trace_channel >>= fun trace_channel ->
+  let pcap_buf = Cstruct.create Pcap.sizeof_pcap_packet in
+  let time = Unix.gettimeofday () in
+  Pcap.LE.set_pcap_packet_incl_len pcap_buf (Int32.of_int (String.length buffer));
+  Pcap.LE.set_pcap_packet_orig_len pcap_buf (Int32.of_int (String.length buffer));
+  Pcap.LE.set_pcap_packet_ts_sec pcap_buf (Int32.of_float time);
+  let frac = (time -. (float_of_int (truncate time))) *. 1000000.0 in
+  Pcap.LE.set_pcap_packet_ts_usec pcap_buf (Int32.of_float frac);
+  Lwt_io.write trace_channel (Cstruct.to_string pcap_buf ^ buffer)
+
 module Main (C: V1_LWT.CONSOLE) (Netif : V1_LWT.NETWORK) = struct
-  module Stackv41_E = Ethif.Make(Netif)
+  module Pcap_netif = struct
+    include Netif
+
+    let write t buffer =
+      pcap_record (Cstruct.to_string buffer) >>= fun () ->
+      write t buffer
+
+    let writev t buffers =
+      pcap_record (Cstruct.copyv buffers) >>= fun () ->
+      writev t buffers
+
+    let listen t fn =
+      listen t (fun buffer ->
+        pcap_record (Cstruct.to_string buffer) >>= fun () ->
+        fn buffer
+      )
+  end
+
+  module Stackv41_E = Ethif.Make(Pcap_netif)
   module Stackv41_I = Ipv4.Make(Stackv41_E)(Clock)(OS.Time)
   module Stackv41_U = Udp.Make (Stackv41_I)
   module Stackv41_T = Tcp.Flow.Make(Stackv41_I)(OS.Time)(Clock)(Random)
-  module S = Tcpip_stack_direct.Make(C)(OS.Time)(Random)(Netif)(Stackv41_E)(Stackv41_I)(Stackv41_U)(Stackv41_T)
+  module S = Tcpip_stack_direct.Make(C)(OS.Time)(Random)(Pcap_netif)(Stackv41_E)(Stackv41_I)(Stackv41_U)(Stackv41_T)
 
   let stackv41 console interface =
     let config = {
