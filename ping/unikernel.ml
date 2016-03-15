@@ -16,17 +16,11 @@ module Main (C:CONSOLE) (N:NETWORK) (Clock: V1.CLOCK) = struct
   module A = Arpv4.Make(E)(Clock)(OS.Time)
   module I = Ipv4.Make(E)(A)
 
-  let or_error _c name fn t =
-    fn t
-    >>= function
-    | `Error _e -> Lwt.fail (Failure ("Error starting " ^ name))
-    | `Ok t     -> Lwt.return t
-
   let start c n _ =
     C.log c (green "starting...");
-    or_error c "Ethif" E.connect n >>= fun e ->
-    or_error c "Arpv4" A.connect e >>= fun a ->
-    or_error c "Ipv4" (I.connect e) a >>= fun i ->
+    E.connect n >>= fun e ->
+    A.connect e >>= fun a ->
+    I.connect e a >>= fun i ->
 
     I.set_ip i (Ipaddr.V4.of_string_exn ipaddr) >>= fun () ->
     I.set_ip_netmask i (Ipaddr.V4.of_string_exn netmask) >>= fun () ->
