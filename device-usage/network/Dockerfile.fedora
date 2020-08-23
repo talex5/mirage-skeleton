@@ -1,0 +1,16 @@
+# Pin the base image to a specific hash for maximum reproducibility.
+# It will probably still work on newer images, though, unless Debian
+# changes some compiler optimisations (unlikely).
+FROM ocurrent/opam@sha256:321ed4de06b2ed0ba0af4e8d169c452bd414b89005279853d1153332c644afae
+
+# Pin last known-good version for reproducible builds.
+# Remove this line (and the base image pin above) if you want to test with the
+# latest versions.
+RUN cd ~/opam-repository && git fetch origin master && git reset --hard 7a1de9ce7715ea60d32a725fa85d11d4457890ec && opam repo add mirage-dev-3.x+xen-pvh-via-solo5 git+https://github.com/mirage/mirage-dev.git#3.x+xen-pvh-via-solo5 && opam update
+RUN opam depext -i -y mirage
+RUN opam pin -n solo5-bindings-xen git+https://github.com/mato/solo5.git#support-xen-4.8
+RUN opam pin -n ocaml-freestanding git+https://github.com/mato/ocaml-freestanding.git#malloc-debug
+RUN mkdir /home/opam/src
+ADD config.ml /home/opam/src/config.ml
+WORKDIR /home/opam/src
+RUN opam config exec -- mirage configure -t qubes && make depend
